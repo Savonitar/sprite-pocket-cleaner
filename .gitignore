@@ -1,0 +1,6 @@
+.sprite-pocket-cleaner-preview/
+.art-backup/
+__pycache__/
+*.pyc
+plan.json
+.DS_Store

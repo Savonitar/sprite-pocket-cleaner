@@ -1,0 +1,584 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sprite Pocket Cleaner</title>
+<!--
+  Marking UI for sprite_pocket_cleaner.py.
+
+  Open this file in a browser (no server, no build step - it is deliberately one file with no
+  dependencies), drop a sheet .png on it, optionally drop its .png.meta so it knows where the
+  frames are, then click the leftover matte pockets. It previews the flood fill live and propagates
+  each mark across the loop exactly the way the python tool does.
+
+  It writes NO pixels. The export is a plan.json holding the seed points you clicked; the
+  python tool replays the same fill and owns every byte that reaches the PNG - same as every
+  other art tool in this repo.
+
+  Keeping the two algorithms identical is the whole contract: 4-connectivity, membership is
+  "max per-channel difference from the seed <= tolerance AND alpha > 0", a fill never crosses
+  a frame rect, and propagation seeds from the region's BRIGHTEST colour, tries every
+  candidate within the search radius, and refuses a region only for being too BIG. They have
+  drifted apart once already - a seed-search fix landed in the python and not here, which
+  would have previewed a clean result while the png kept its pocket. So after changing either
+  side, run:
+
+      python3 sprite_pocket_cleaner.py --parity
+
+  which executes THIS file's script over the same pixels and fails if the answers differ.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #16181c; color: #d7dae0; display: flex; height: 100vh; overflow: hidden; }
+  #side { width: 320px; flex: none; padding: 14px; overflow-y: auto; background: #1d2026;
+          border-right: 1px solid #2c3038; }
+  #stage { flex: 1; position: relative; overflow: hidden;
+           background-color: #2a2d33;
+           background-image: linear-gradient(45deg, #24272c 25%, transparent 25%),
+                             linear-gradient(-45deg, #24272c 25%, transparent 25%),
+                             linear-gradient(45deg, transparent 75%, #24272c 75%),
+                             linear-gradient(-45deg, transparent 75%, #24272c 75%);
+           background-size: 16px 16px;
+           background-position: 0 0, 0 8px, 8px -8px, -8px 0; }
+  canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
+  h1 { font-size: 14px; margin: 0 0 10px; letter-spacing: .04em; text-transform: uppercase;
+       color: #8b93a1; }
+  h2 { font-size: 12px; margin: 18px 0 6px; color: #8b93a1; text-transform: uppercase;
+       letter-spacing: .04em; }
+  label { display: block; margin: 8px 0 2px; color: #a7aebb; }
+  input[type=range] { width: 100%; }
+  input[type=text] { width: 100%; padding: 5px 7px; background: #14161a; color: #d7dae0;
+                     border: 1px solid #343943; border-radius: 4px; font: inherit; }
+  button { padding: 6px 10px; margin: 4px 4px 0 0; background: #2b303a; color: #d7dae0;
+           border: 1px solid #3b414d; border-radius: 4px; font: inherit; cursor: pointer; }
+  button:hover { background: #353b47; }
+  button.primary { background: #2f6d4f; border-color: #3f8a66; }
+  button.primary:hover { background: #388059; }
+  #zoomRow { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  #zoomRow button { width: 34px; margin: 0; font-size: 15px; line-height: 1; }
+  #zoomPct { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+  #zoomRow span { color: #79808d; }
+  #marks { margin: 6px 0 0; padding: 0; list-style: none; font-variant-numeric: tabular-nums; }
+  #marks li { display: flex; justify-content: space-between; gap: 6px; padding: 3px 0;
+              border-bottom: 1px solid #262a31; }
+  #marks button { padding: 0 6px; margin: 0; font-size: 11px; }
+  .hint { color: #79808d; font-size: 11.5px; }
+  .warn { color: #e0a35c; }
+  #drop { position: absolute; inset: 0; display: flex; align-items: center;
+          justify-content: center; font-size: 15px; color: #79808d; pointer-events: none;
+          text-align: center; }
+  code { background: #14161a; padding: 1px 4px; border-radius: 3px; color: #9fd0b4; }
+  #cmd { user-select: all; word-break: break-all; display: block; margin-top: 6px;
+         padding: 6px; }
+</style>
+
+<div id="side">
+  <h1>Sprite Pocket Cleaner</h1>
+  <p class="hint">Drop a sheet <b>.png</b> here (and its <b>.png.meta</b>, so frames and
+     propagation work). Click a leftover background pocket &mdash; white, gray, or another
+     matte colour &mdash; to mark it. Shift-drag marks a rectangle instead, for a fringe a
+     flood fill will not hold.</p>
+
+  <h2>Sheet</h2>
+  <input type="file" id="files" multiple accept=".png,.meta">
+  <label>PNG path (recorded in plan.json)</label>
+  <input type="text" id="path" placeholder="/path/to/sprite_sheet.png">
+  <p class="hint" id="info">no image loaded</p>
+
+  <h2>View</h2>
+  <button id="fit">Fit &amp; centre</button>
+  <div id="zoomRow">
+    <button id="zoomOut" title="zoom out">&minus;</button>
+    <input type="text" id="zoomPct" value="100" spellcheck="false" inputmode="numeric">
+    <span>%</span>
+    <button id="zoomIn" title="zoom in">+</button>
+  </div>
+
+  <h2>Fill</h2>
+  <label>Tolerance <span id="tolVal">30</span></label>
+  <input type="range" id="tol" min="0" max="120" value="30">
+  <label>Feather <span id="fthVal">2</span> px</label>
+  <input type="range" id="fth" min="0" max="6" value="2">
+  <label>Propagation search <span id="srcVal">10</span> px</label>
+  <input type="range" id="src" min="0" max="40" value="10">
+  <label><input type="checkbox" id="prop"> propagate to every frame (review every red region)</label>
+  <label><input type="checkbox" id="any"> allow dark / coloured matte for new marks</label>
+  <p class="hint">Use this only after clicking and previewing a known leftover pocket. It is
+     saved on that mark only; ordinary marks still reject likely artwork.</p>
+  <label><input type="checkbox" id="red"> show erased in red</label>
+
+  <h2>Marks</h2>
+  <ul id="marks"></ul>
+  <button id="undo">Undo</button>
+  <button id="clear">Clear</button>
+  <button id="recompute">Recompute all</button>
+
+  <h2>Export</h2>
+  <button class="primary" id="save">Download plan.json</button>
+  <p class="hint">Then, from the repo root:</p>
+  <code id="cmd">python3 sprite_pocket_cleaner.py --plan ~/Downloads/plan.json --dry-run</code>
+
+  <h2>Controls</h2>
+  <p class="hint">wheel = zoom &middot; drag = pan &middot; click = mark &middot;
+     shift-drag = rect mark &middot; <kbd>F</kbd> = fit &amp; centre (same as the button, for
+     when you have panned the sheet off screen)</p>
+</div>
+
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="drop">drop a sheet .png here</div>
+</div>
+
+<script>
+// ---------------------------------------------------------------- state
+let img = null;          // ImageData of the sheet, untouched
+let W = 0, H = 0;
+let boxes = [];          // [x0, y0, x1, y1] per frame, top-left origin
+let marks = [];          // {type, x, y, w, h, tolerance, propagate, mask, count, frames}
+let erased = null;       // Uint8Array(W*H), union of every mark's region
+let off = null;          // offscreen canvas holding the composited result
+let zoom = 1, panX = 0, panY = 0;
+
+const view = document.getElementById('view');
+const ctx = view.getContext('2d');
+const stage = document.getElementById('stage');
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- loading
+stage.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); take(e.dataTransfer.files); });
+document.getElementById('files').addEventListener('change', e => take(e.target.files));
+
+// The .meta is parsed first on purpose: applyMeta() needs the sheet height, so it re-runs
+// once loadPng has it, and this way the order they were dropped in never matters.
+function take(files) {
+  for (const file of files) if (/\.meta$/i.test(file.name)) loadMeta(file);
+  for (const file of files) if (/\.png$/i.test(file.name)) loadPng(file);
+}
+
+function loadPng(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const image = new Image();
+    image.onload = () => {
+      W = image.width; H = image.height;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      c.getContext('2d').drawImage(image, 0, 0);
+      img = c.getContext('2d').getImageData(0, 0, W, H);
+      erased = new Uint8Array(W * H);
+      marks = [];
+      if (!boxes.length) boxes = [[0, 0, W, H]];
+      off = document.createElement('canvas');
+      off.width = W; off.height = H;
+      $('drop').style.display = 'none';
+      if (!$('path').value) $('path').value = file.name.replace(/\.png$/i, '');
+      applyMeta();                 // a .meta dropped first needs H, so it is parsed here too
+      fit(); redraw(); refreshList();
+    };
+    image.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+let metaText = null;
+
+function loadMeta(file) {
+  const reader = new FileReader();
+  reader.onload = () => { metaText = reader.result; applyMeta(); };
+  reader.readAsText(file);
+}
+
+// Same rect grammar the python tools read. y is measured from the BOTTOM in a .meta, so it
+// is flipped here once and everything downstream works in top-left pixel coordinates. This
+// needs the sheet height, so it is re-run when the png arrives after the .meta.
+function applyMeta() {
+  if (!metaText || !H) return;
+  const re = /name: ([^\n]+)\n\s*rect:\n\s*serializedVersion: 2\n\s*x: ([\d.]+)\n\s*y: ([\d.]+)\n\s*width: ([\d.]+)\n\s*height: ([\d.]+)/g;
+  const re2 = /name: ([^\n]+)\n\s*rect:\s*\{x: ([\d.]+), y: ([\d.]+), width: ([\d.]+), height: ([\d.]+)\}/g;
+  let found = [], m;
+  while ((m = re.exec(metaText))) found.push(m);
+  if (!found.length) while ((m = re2.exec(metaText))) found.push(m);
+  found.sort((a, b) => order(a[1]) - order(b[1]));
+  const rects = found.map(f => f.slice(2, 6).map(Number));
+  if (!rects.length) { alert('that .meta has no sliced sprites'); return; }
+  boxes = rects.map(([x, y, w, h]) => [Math.round(x), Math.round(H - (y + h)),
+                                       Math.round(x + w), Math.round(H - y)]);
+  recompute();
+  updateInfo();
+}
+const order = name => { const m = /_(\d+)$/.exec(name); return m ? +m[1] : 0; };
+
+function updateInfo() {
+  $('info').textContent = img
+    ? `${W}x${H}, ${boxes.length} frame${boxes.length === 1 ? '' : 's'}` +
+      (boxes.length === 1 ? ' (drop the .png.meta for per-frame propagation)' : '')
+    : 'no image loaded';
+}
+
+// ---------------------------------------------------------------- the fill
+// Kept deliberately identical to region_at() in sprite_pocket_cleaner.py: 4-connected, and a
+// pixel joins the region when every channel is within `tol` of the seed AND it is not already
+// transparent. The frame box is a hard wall so a fill cannot crawl into the next cell.
+function floodFill(sx, sy, tol, box) {
+  const d = img.data, [x0, y0, x1, y1] = box;
+  const si = (sy * W + sx) * 4;
+  if (d[si + 3] === 0) return null;
+  const r = d[si], g = d[si + 1], b = d[si + 2];
+  const mask = new Uint8Array(W * H);
+  const stack = [sy * W + sx];
+  mask[sy * W + sx] = 1;
+  let count = 0;
+  while (stack.length) {
+    const p = stack.pop();
+    count++;
+    const px = p % W, py = (p - px) / W;
+    for (const [nx, ny] of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
+      if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1) continue;
+      const q = ny * W + nx;
+      if (mask[q]) continue;
+      const i = q * 4;
+      if (d[i + 3] === 0) continue;
+      if (Math.abs(d[i] - r) > tol || Math.abs(d[i + 1] - g) > tol ||
+          Math.abs(d[i + 2] - b) > tol) continue;
+      mask[q] = 1;
+      stack.push(q);
+    }
+  }
+  return { mask, count, rgb: [r, g, b] };
+}
+
+function rectFill(x, y, w, h, tol) {
+  const d = img.data;
+  let best = -1, rgb = [0, 0, 0];
+  for (let py = y; py < y + h; py++) for (let px = x; px < x + w; px++) {
+    const i = (py * W + px) * 4;
+    if (d[i + 3] === 0) continue;
+    const lum = d[i] + d[i + 1] + d[i + 2];
+    if (lum > best) { best = lum; rgb = [d[i], d[i + 1], d[i + 2]]; }
+  }
+  if (best < 0) return null;
+  const mask = new Uint8Array(W * H);
+  let count = 0;
+  for (let py = y; py < y + h; py++) for (let px = x; px < x + w; px++) {
+    const i = (py * W + px) * 4;
+    if (d[i + 3] === 0) continue;
+    if (Math.abs(d[i] - rgb[0]) > tol || Math.abs(d[i + 1] - rgb[1]) > tol ||
+        Math.abs(d[i + 2] - rgb[2]) > tol) continue;
+    mask[py * W + px] = 1; count++;
+  }
+  return { mask, count, rgb };
+}
+
+const frameOf = (x, y) => boxes.findIndex(b => x >= b[0] && x < b[2] && y >= b[1] && y < b[3]);
+
+// Mirrors find_seeds(): the drawing shifts a few pixels between frames, so a mapped point one
+// pixel off lands on the outline. The NEAREST match is not enough either - it can lock onto a
+// single stray antialiased pixel beside the real pocket - so all
+// the candidates come back and the caller floods from each.
+function findSeeds(box, px, py, rgb, tol, search) {
+  const d = img.data, out = [];
+  for (let y = Math.max(box[1], py - search); y < Math.min(box[3], py + search + 1); y++)
+    for (let x = Math.max(box[0], px - search); x < Math.min(box[2], px + search + 1); x++) {
+      const i = (y * W + x) * 4;
+      if (d[i + 3] === 0) continue;
+      if (Math.abs(d[i] - rgb[0]) > tol || Math.abs(d[i + 1] - rgb[1]) > tol ||
+          Math.abs(d[i + 2] - rgb[2]) > tol) continue;
+      out.push([x, y, (x - px) * (x - px) + (y - py) * (y - py)]);
+    }
+  return out.sort((a, b) => a[2] - b[2]);
+}
+
+// The lightest colour in the marked region - a far more stable propagation reference than
+// whatever pixel happened to be under the click, which is often a dim edge one.
+function brightest(mask) {
+  const d = img.data;
+  let best = [0, 0, 0], bestSum = -1;
+  for (let p = 0; p < mask.length; p++) {
+    if (!mask[p]) continue;
+    const i = p * 4, sum = d[i] + d[i + 1] + d[i + 2];
+    if (sum > bestSum) { bestSum = sum; best = [d[i], d[i + 1], d[i + 2]]; }
+  }
+  return best;
+}
+
+const AREA_RATIO = 4;
+const SEED_CANDIDATES = 24;
+const SEED_MIN_LIGHT = 190;
+const SEED_MAX_SAT = 40;
+
+function seedIsBackgroundLike(rgb) {
+  const lo = Math.min(...rgb), hi = Math.max(...rgb);
+  return lo >= SEED_MIN_LIGHT && hi - lo <= SEED_MAX_SAT;
+}
+
+function rectWithinFrame(mark, box) {
+  return mark.w > 0 && mark.h > 0 && mark.x >= box[0] && mark.y >= box[1] &&
+         mark.x + mark.w <= box[2] && mark.y + mark.h <= box[3];
+}
+
+function buildMark(mark) {
+  const tol = mark.tolerance;
+  if (mark.type === 'rect') {
+    const frame = frameOf(mark.x, mark.y);
+    if (frame < 0 || !rectWithinFrame(mark, boxes[frame])) return null;
+    const hit = rectFill(mark.x, mark.y, mark.w, mark.h, tol);
+    if (!hit) return null;
+    if (!mark.allowAnyColour && !seedIsBackgroundLike(hit.rgb)) return null;
+    mark.mask = hit.mask; mark.count = hit.count; mark.rgb = hit.rgb; mark.frames = 1;
+    return mark;
+  }
+  const frame = frameOf(mark.x, mark.y);
+  if (frame < 0) return null;
+  const hit = floodFill(mark.x, mark.y, tol, boxes[frame]);
+  if (!hit) return null;
+  if (!mark.allowAnyColour && !seedIsBackgroundLike(hit.rgb)) return null;
+  const mask = hit.mask;
+  let frames = 1;
+  if (mark.propagate && boxes.length > 1) {
+    const [sx, sy] = boxes[frame];
+    const ref = brightest(hit.mask);
+    for (let j = 0; j < boxes.length; j++) {
+      if (j === frame) continue;
+      const cands = findSeeds(boxes[j], boxes[j][0] + (mark.x - sx), boxes[j][1] + (mark.y - sy),
+                              ref, tol, +$('src').value).slice(0, SEED_CANDIDATES);
+      let best = null, bestCount = 0;
+      for (const [cx, cy] of cands) {
+        if (best && best[cy * W + cx]) continue;          // already inside the best region
+        const other = floodFill(cx, cy, tol, boxes[j]);
+        if (!other) continue;
+        // the same guard the python tool applies: only a wildly BIGGER region means the fill
+        // leaked. Smaller is normal - a pocket opens and closes over a loop.
+        if (other.count > hit.count * AREA_RATIO) continue;
+        if (other.count > bestCount) { best = other.mask; bestCount = other.count; }
+      }
+      if (!best) continue;
+      for (let k = 0; k < mask.length; k++) if (best[k]) mask[k] = 1;
+      frames++;
+    }
+  }
+  mark.mask = mask;
+  mark.count = hit.count;
+  mark.rgb = hit.rgb;
+  mark.frames = frames;
+  return mark;
+}
+
+function recompute() {
+  if (!img) return;
+  erased = new Uint8Array(W * H);
+  marks = marks.filter(m => buildMark(m));
+  for (const m of marks) for (let i = 0; i < erased.length; i++) if (m.mask[i]) erased[i] = 1;
+  redraw(); refreshList();
+}
+
+// ---------------------------------------------------------------- drawing
+function redraw() {
+  if (!img) return;
+  const out = new ImageData(new Uint8ClampedArray(img.data), W, H);
+  const showRed = $('red').checked;
+  const d = out.data;
+  for (let i = 0, p = 0; p < erased.length; p++, i += 4) {
+    if (!erased[p]) continue;
+    if (showRed) { d[i] = 255; d[i + 1] = 40; d[i + 2] = 90; d[i + 3] = 220; }
+    else d[i + 3] = 0;
+  }
+  off.getContext('2d').putImageData(out, 0, 0);
+  paint();
+}
+
+function paint() {
+  const rect = stage.getBoundingClientRect();
+  view.width = rect.width; view.height = rect.height;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, view.width, view.height);
+  if (!off) return;
+  ctx.drawImage(off, panX, panY, W * zoom, H * zoom);
+  if (zoom >= 2 && boxes.length > 1) {
+    ctx.strokeStyle = 'rgba(120,160,255,.25)';
+    ctx.lineWidth = 1;
+    for (const [x0, y0, x1, y1] of boxes)
+      ctx.strokeRect(panX + x0 * zoom, panY + y0 * zoom, (x1 - x0) * zoom, (y1 - y0) * zoom);
+  }
+  ctx.strokeStyle = '#5cd6a0';
+  ctx.lineWidth = 1.5;
+  for (const m of marks) {
+    const cx = panX + (m.x + .5) * zoom, cy = panY + (m.y + .5) * zoom;
+    ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2); ctx.stroke();
+  }
+  showZoom();      // every zoom change lands here, so the readout cannot go stale
+}
+
+const MIN_ZOOM = 0.02, MAX_ZOOM = 64, ZOOM_STEP = 1.25;
+
+// The whole sheet, centred. This is the "I panned into the void and lost the pet" button:
+// pan and zoom are both reset, so it always puts something on screen.
+function fit() {
+  if (!img) return;
+  const rect = stage.getBoundingClientRect();
+  zoom = Math.min(rect.width / W, rect.height / H) * 0.95;
+  panX = (rect.width - W * zoom) / 2;
+  panY = (rect.height - H * zoom) / 2;
+  updateInfo();
+  paint();
+}
+
+// Zoom about a fixed point in VIEW coordinates, so whatever sits under it stays put. The
+// wheel anchors on the cursor, the +/- buttons and the % field on the middle of the view -
+// one function so they can never drift into behaving differently.
+function zoomTo(next, viewX, viewY) {
+  if (!img) return;
+  next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+  const ix = (viewX - panX) / zoom, iy = (viewY - panY) / zoom;
+  zoom = next;
+  panX = viewX - ix * zoom;
+  panY = viewY - iy * zoom;
+  paint();
+}
+
+const viewCentre = () => {
+  const rect = view.getBoundingClientRect();
+  return [rect.width / 2, rect.height / 2];
+};
+
+// Never fight the user mid-edit: while the field has focus it is theirs, not a readout.
+function showZoom() {
+  const field = $('zoomPct');
+  if (document.activeElement !== field) field.value = Math.round(zoom * 100);
+}
+
+window.addEventListener('resize', paint);
+
+// ---------------------------------------------------------------- input
+let drag = null;
+view.addEventListener('mousedown', e => {
+  drag = { x: e.clientX, y: e.clientY, panX, panY, shift: e.shiftKey, moved: 0,
+           img: toImage(e) };
+});
+view.addEventListener('mousemove', e => {
+  if (!drag) return;
+  drag.moved = Math.max(drag.moved, Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y));
+  if (drag.shift) {
+    paint();
+    const a = drag.img, b = toImage(e);
+    ctx.strokeStyle = '#e0a35c';
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(panX + Math.min(a[0], b[0]) * zoom, panY + Math.min(a[1], b[1]) * zoom,
+                   Math.abs(b[0] - a[0]) * zoom, Math.abs(b[1] - a[1]) * zoom);
+    ctx.setLineDash([]);
+  } else {
+    panX = drag.panX + (e.clientX - drag.x);
+    panY = drag.panY + (e.clientY - drag.y);
+    paint();
+  }
+});
+view.addEventListener('mouseup', e => {
+  if (!drag || !img) { drag = null; return; }
+  const a = drag.img, b = toImage(e);
+  if (drag.shift && drag.moved > 3) {
+    addMark({ type: 'rect', x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]),
+              w: Math.abs(b[0] - a[0]) + 1, h: Math.abs(b[1] - a[1]) + 1 });
+  } else if (drag.moved <= 3) {
+    addMark({ type: 'point', x: b[0], y: b[1] });
+  }
+  drag = null;
+});
+view.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = view.getBoundingClientRect();
+  zoomTo(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX - rect.left, e.clientY - rect.top);
+}, { passive: false });
+document.addEventListener('keydown', e => {
+  if (e.key === 'f' || e.key === 'F') fit();
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { marks.pop(); recompute(); }
+});
+
+function toImage(e) {
+  const rect = view.getBoundingClientRect();
+  return [Math.floor((e.clientX - rect.left - panX) / zoom),
+          Math.floor((e.clientY - rect.top - panY) / zoom)];
+}
+
+function addMark(mark) {
+  if (mark.x < 0 || mark.y < 0 || mark.x >= W || mark.y >= H) return;
+  mark.tolerance = +$('tol').value;
+  mark.propagate = $('prop').checked;
+  // A manual, previewed click can intentionally target a dark gray or coloured source matte.
+  // Keep that authority on this mark rather than weakening the guard for the entire plan.
+  mark.allowAnyColour = $('any').checked;
+  if (!buildMark(mark)) {
+    alert('Mark refused: select a light neutral matte, or explicitly enable dark / coloured '
+          + 'matte after verifying the red preview. Rectangle marks must stay within one frame.');
+    return;
+  }
+  marks.push(mark);
+  recompute();
+}
+
+// ---------------------------------------------------------------- side panel
+function refreshList() {
+  const ul = $('marks');
+  ul.innerHTML = '';
+  marks.forEach((m, i) => {
+    const li = document.createElement('li');
+    const label = m.type === 'rect'
+      ? `rect ${m.x},${m.y} ${m.w}x${m.h} - ${m.count}px`
+      : `${m.x},${m.y} - ${m.count}px x ${m.frames} frame${m.frames === 1 ? '' : 's'}`;
+    li.innerHTML = `<span>${label}</span>`;
+    const del = document.createElement('button');
+    del.textContent = 'x';
+    del.onclick = () => { marks.splice(i, 1); recompute(); };
+    li.appendChild(del);
+    ul.appendChild(li);
+  });
+  const total = marks.reduce((n, m) => n + m.mask.reduce((a, v) => a + v, 0), 0);
+  if (marks.length) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="hint">${total}px would be erased in total</span>`;
+    ul.appendChild(li);
+  }
+}
+
+for (const [id, out] of [['tol', 'tolVal'], ['fth', 'fthVal'], ['src', 'srcVal']])
+  $(id).oninput = () => { $(out).textContent = $(id).value; };
+
+$('fit').onclick = fit;
+$('zoomIn').onclick = () => zoomTo(zoom * ZOOM_STEP, ...viewCentre());
+$('zoomOut').onclick = () => zoomTo(zoom / ZOOM_STEP, ...viewCentre());
+$('zoomPct').onchange = () => {                       // fires on Enter and on blur
+  const pct = parseFloat($('zoomPct').value.replace('%', ''));
+  if (isFinite(pct) && pct > 0) zoomTo(pct / 100, ...viewCentre());
+  showZoom();                                         // snap the field back to what happened
+};
+$('red').onchange = redraw;
+$('undo').onclick = () => { marks.pop(); recompute(); };
+$('clear').onclick = () => { marks = []; recompute(); };
+$('recompute').onclick = () => {
+  for (const m of marks) { m.tolerance = +$('tol').value; m.propagate = $('prop').checked; }
+  recompute();
+};
+
+$('save').onclick = () => {
+  if (!marks.length) { alert('nothing marked yet'); return; }
+  const plan = {
+    version: 2,
+    sheet: $('path').value.trim(),
+    defaults: { tolerance: +$('tol').value, feather: +$('fth').value,
+                propagate: $('prop').checked },
+    marks: marks.map(m => m.type === 'rect'
+      ? { type: 'rect', x: m.x, y: m.y, w: m.w, h: m.h, tolerance: m.tolerance,
+          allowAnyColour: m.allowAnyColour }
+      : { type: 'point', x: m.x, y: m.y, tolerance: m.tolerance, propagate: m.propagate,
+          allowAnyColour: m.allowAnyColour })
+  };
+  const blob = new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'plan.json';
+  a.click();
+  $('cmd').textContent =
+    `python3 sprite_pocket_cleaner.py --plan ~/Downloads/plan.json --feather ` +
+    `${$('fth').value} --dry-run`;
+};
+</script>
