@@ -112,7 +112,7 @@ the frame rects; without it the sheet is one frame and nothing propagates.
 | wheel / drag | zoom / pan |
 | **Fit & centre**, or `F` | resets pan+zoom when you've lost the sheet off screen |
 | `−` / `%` field / `+` | zoom out/in, or type an exact percentage |
-| **show erased in red** | paints what would be removed instead of hiding it |
+| **show erased in colour** | paints what would be removed instead of hiding it; choose a preview colour that contrasts with the sprite |
 | Undo / Clear / ✕ | drop last mark / all marks / one mark |
 | **Download plan.json** | export the seed points |
 

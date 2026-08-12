@@ -49,6 +49,9 @@
   input[type=range] { width: 100%; }
   input[type=text] { width: 100%; padding: 5px 7px; background: #14161a; color: #d7dae0;
                      border: 1px solid #343943; border-radius: 4px; font: inherit; }
+  input[type=color] { width: 28px; height: 24px; padding: 1px; vertical-align: middle;
+                      background: #14161a; border: 1px solid #343943; border-radius: 4px;
+                      cursor: pointer; }
   button { padding: 6px 10px; margin: 4px 4px 0 0; background: #2b303a; color: #d7dae0;
            border: 1px solid #3b414d; border-radius: 4px; font: inherit; cursor: pointer; }
   button:hover { background: #353b47; }
@@ -105,7 +108,9 @@
   <label><input type="checkbox" id="any"> allow dark / coloured matte for new marks</label>
   <p class="hint">Use this only after clicking and previewing a known leftover pocket. It is
      saved on that mark only; ordinary marks still reject likely artwork.</p>
-  <label><input type="checkbox" id="red"> show erased in red</label>
+  <label><input type="checkbox" id="red"> show erased in colour
+    <input type="color" id="previewColour" value="#ff285a" aria-label="Erased-area preview colour">
+  </label>
 
   <h2>Marks</h2>
   <ul id="marks"></ul>
@@ -377,15 +382,23 @@ function recompute() {
 function redraw() {
   if (!img) return;
   const out = new ImageData(new Uint8ClampedArray(img.data), W, H);
-  const showRed = $('red').checked;
+  const showColour = $('red').checked;
+  const previewColour = hexToRgb($('previewColour').value);
   const d = out.data;
   for (let i = 0, p = 0; p < erased.length; p++, i += 4) {
     if (!erased[p]) continue;
-    if (showRed) { d[i] = 255; d[i + 1] = 40; d[i + 2] = 90; d[i + 3] = 220; }
+    if (showColour) {
+      d[i] = previewColour[0]; d[i + 1] = previewColour[1]; d[i + 2] = previewColour[2]; d[i + 3] = 220;
+    }
     else d[i + 3] = 0;
   }
   off.getContext('2d').putImageData(out, 0, 0);
   paint();
+}
+
+function hexToRgb(hex) {
+  const value = parseInt(hex.slice(1), 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
 }
 
 function paint() {
@@ -552,6 +565,7 @@ $('zoomPct').onchange = () => {                       // fires on Enter and on b
   showZoom();                                         // snap the field back to what happened
 };
 $('red').onchange = redraw;
+$('previewColour').oninput = redraw;
 $('undo').onclick = () => { marks.pop(); recompute(); };
 $('clear').onclick = () => { marks = []; recompute(); };
 $('recompute').onclick = () => {
