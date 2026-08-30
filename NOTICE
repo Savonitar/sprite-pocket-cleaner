@@ -2,3 +2,7 @@ Sprite Pocket Cleaner
 Copyright 2026 Aleksandr Savonin (Savonitar)
 
 This product includes software developed by Aleksandr Savonin.
+
+The bundled `sample/sample_sheet.png` is the privately owned “Office Cat”
+game asset, included by its owner as a real-world test fixture. It is not
+offered as reusable sprite art. See `sample/README.md`.

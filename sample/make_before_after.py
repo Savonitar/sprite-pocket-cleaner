@@ -1,79 +1,92 @@
 #!/usr/bin/env python3
-"""Regenerate before-after.png (the README image) from the sample sheet.
+"""Regenerate before-after.png from the bundled real-world Office Cat fixture.
 
-Runs the real tool on a COPY of the sample, so the shipped sample keeps its defect - the
-quickstart in README.md depends on that pocket still being there.
+The real applier runs on a temporary copy, so sample_sheet.png deliberately keeps the opaque
+gray matte trapped inside the tail curl.
 
 Run:  python3 sample/make_before_after.py
 """
+import hashlib
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
 from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-FRAMES = (2, 3, 4, 5)          # the frames that carry the defect
-W, H, SCALE = 96, 120, 4
+SOURCE = HERE / 'sample_sheet.png'
+SOURCE_META = HERE / 'sample_sheet.png.meta'
+EXPECTED_SHA256 = '84310781e847829d28c408145366fbe42d2065d683980451fa72d6cd08be4acf'
+EXPECTED_META_SHA256 = '2b64d12f4da6ebbd7842ef0a2ba0dcddc5fa27d9bbd4c67a938d0d709bc92869'
 
-
-# Flat magenta, not a checkerboard: the pocket IS white, and white-on-checkerboard is exactly
-# the comparison the eye gets wrong (I misread my own first attempt). The tool's own preview
-# composites over magenta for the same reason.
+CELL = 512
+FRAME = 0
+MARK = (330, 305)
+CROP = (110, 80, 410, 450)
+LABEL_H = 26
+GAP = 8
+SCALE = 2
 VOID = (255, 0, 220)
 
 
-def backdrop(w, h):
-    return Image.new('RGB', (w, h), VOID)
+def source_frame(sheet):
+    col, row = FRAME % 5, FRAME // 5
+    return sheet.crop((col * CELL, row * CELL, (col + 1) * CELL, (row + 1) * CELL))
 
 
-def strip(arr):
-    out = Image.new('RGBA', (len(FRAMES) * W, H), (0, 0, 0, 0))
-    for k, f in enumerate(FRAMES):
-        out.alpha_composite(Image.fromarray(arr[:, f * W:(f + 1) * W], 'RGBA'), (k * W, 0))
-    return out
-
-
-def render(layer, w, h):
-    bg = backdrop(w, h).convert('RGBA')
-    bg.alpha_composite(layer.resize((w, h), Image.NEAREST))
+def over_void(layer):
+    bg = Image.new('RGBA', layer.size, (*VOID, 255))
+    bg.alpha_composite(layer)
     return bg.convert('RGB')
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp())
+    digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()
+    meta_digest = hashlib.sha256(SOURCE_META.read_bytes()).hexdigest()
+    if digest != EXPECTED_SHA256 or meta_digest != EXPECTED_META_SHA256:
+        raise SystemExit(
+            'the Office Cat sample or metadata no longer matches the reviewed fixture; '
+            'restore both before regenerating the documentation image')
+
+    tmp = Path(tempfile.mkdtemp(prefix='sprite-pocket-cleaner-'))
     try:
-        shutil.copy(HERE / 'sample_sheet.png', tmp / 's.png')
-        shutil.copy(HERE / 'sample_sheet.png.meta', tmp / 's.png.meta')
-        subprocess.run([sys.executable, str(ROOT / 'sprite_pocket_cleaner.py'), str(tmp / 's.png'),
-                        '--at', '317,75', '--at', '355,75',
-                        '--propagate',
-                        '--no-preview', '--no-backup'],
-                       check=True, capture_output=True)
-        before = np.array(Image.open(HERE / 'sample_sheet.png').convert('RGBA'))
-        after = np.array(Image.open(tmp / 's.png').convert('RGBA'))
+        dirty = tmp / 'office_cat.png'
+        shutil.copy(SOURCE, dirty)
+        shutil.copy(SOURCE_META, tmp / 'office_cat.png.meta')
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / 'sprite_pocket_cleaner.py'),
+                str(dirty),
+                '--at',
+                f'{MARK[0]},{MARK[1]}',
+                '--any-colour',
+                '--no-preview',
+                '--no-backup',
+            ],
+            check=True,
+            capture_output=True,
+        )
+        before = source_frame(Image.open(SOURCE).convert('RGBA')).crop(CROP)
+        after = source_frame(Image.open(dirty).convert('RGBA')).crop(CROP)
     finally:
         shutil.rmtree(tmp)
 
-    top, bottom = strip(before), strip(after)
-    w, h = top.width * SCALE, top.height * SCALE
-    label = 30
-    img = Image.new('RGB', (w, h * 2 + label * 2 + 10), (255, 255, 255))
-    d = ImageDraw.Draw(img)
-    d.text((10, 9), 'BEFORE   opaque white filling the holes enclosed by the arms (frames 2-5)',
-           fill=(170, 25, 25))
-    img.paste(render(top, w, h), (0, label))
-    d.text((10, label + h + 13),
-           'AFTER   erased - the background shows through; eyes and art untouched',
-           fill=(20, 115, 60))
-    img.paste(render(bottom, w, h), (0, label * 2 + h + 10))
+    panel_w, panel_h = before.size
+    image = Image.new('RGB', (panel_w * 2 + GAP, panel_h + LABEL_H), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.text((6, 7), 'BEFORE  gray matte in tail loop', fill=(170, 25, 25))
+    draw.text((panel_w + GAP + 6, 7), 'AFTER  transparent loop', fill=(20, 115, 60))
+    image.paste(over_void(before), (0, LABEL_H))
+    image.paste(over_void(after), (panel_w + GAP, LABEL_H))
+
+    image = image.resize((image.width * SCALE, image.height * SCALE), Image.Resampling.NEAREST)
     out = ROOT / 'before-after.png'
-    img.save(out)
-    print(f'wrote {out} {img.size}')
+    image.save(out, optimize=True)
+    print(f'wrote {out} {image.size}')
 
 
 if __name__ == '__main__':
